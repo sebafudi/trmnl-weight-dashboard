@@ -1,0 +1,417 @@
+<svg width="0" height="0" style="position: absolute" aria-hidden="true"><defs>
+  <pattern id="einkFill" patternUnits="userSpaceOnUse" width="5" height="5">
+    <rect x="0" y="0" width="1" height="1" fill="#000000"></rect>
+  </pattern>
+</defs></svg>
+
+<div style="display: flex; flex-direction: row; width: 100%; height: 440px; gap: 0px; padding-top: 5px;">
+
+  <div style="width: 29%; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px dotted #000; padding-right: 12px;">
+
+    <div style="border-bottom: 1px dotted #000; padding-bottom: 8px;">
+      <span class="value value--large value--tnums" id="val-current" style="display: block; font-size: 46px; line-height: 1; margin-bottom: 4px;">--</span>
+      <span class="label">Trend Weight (kg)</span>
+    </div>
+
+    <div style="border-bottom: 1px dotted #000; padding-bottom: 8px;">
+      <div style="display: flex; align-items: baseline; gap: 6px;">
+        <span class="value value--small value--tnums" id="val-trend7">--</span>
+        <span class="value value--xsmall" style="font-size: 16px; margin-right: 4px;">7d</span>
+        <span class="value value--small value--tnums" id="val-trend30">--</span>
+        <span class="value value--xsmall" style="font-size: 16px;">30d</span>
+      </div>
+      <span class="label">Trend Change</span>
+    </div>
+
+    <div style="border-bottom: 1px dotted #000; padding-bottom: 8px;">
+      <div style="display: flex; align-items: baseline; gap: 6px;">
+        <span class="value value--small value--tnums" id="val-peakdiff">--</span>
+        <span class="value value--xsmall value--tnums" id="val-max-lbl" style="font-size: 16px;">(--)</span>
+      </div>
+      <span class="label">Down from Peak</span>
+    </div>
+
+    <div style="border-bottom: 1px dotted #000; padding-bottom: 8px;">
+      <div style="display: flex; align-items: baseline; gap: 6px;">
+        <span class="value value--small value--tnums" id="val-goaldist">--</span>
+        <span class="value value--xsmall value--tnums" id="val-goalpct" style="font-size: 16px;">(--%)</span>
+      </div>
+      <span class="label">Left to Goal (<span id="val-goal-lbl"></span>)</span>
+    </div>
+
+    <div style="border-bottom: 1px dotted #000; padding-bottom: 8px;">
+      <div style="display: flex; align-items: baseline; gap: 6px;">
+        <span class="value value--small value--tnums" id="val-prediction" style="display: block;">--</span>
+        <span class="value value--xsmall value--tnums" id="val-rate" style="font-size: 16px;">--</span>
+      </div>
+      <span class="label">Goal Pace</span>
+    </div>
+
+    <div>
+      <div style="display: flex; align-items: baseline; gap: 6px;">
+        <span class="value value--xsmall value--tnums" id="val-latest-w" style="font-size: 16px;">--</span>
+        <span class="value value--xsmall value--tnums" id="val-latest" style="font-size: 16px;">--</span>
+      </div>
+      <span class="label">Last Weigh-In</span>
+    </div>
+
+  </div>
+
+  <div style="width: 71%; height: 100%; padding-left: 5px;">
+    <div id="weight-chart" style="width: 100%; height: 440px;"></div>
+  </div>
+
+</div>
+
+<script src="https://trmnl.com/js/highcharts/12.3.0/highcharts.js"></script>
+<script src="https://trmnl.com/js/highcharts/12.3.0/highcharts-more.js"></script>
+
+<script type="text/javascript">
+  // ==========================================
+  // DASHBOARD SETTINGS
+  // ==========================================
+  var SPLIT_PERCENT   = 50;    // x-axis split: historical | recent
+  var GOAL_WEIGHT     = 80.0;  // target weight (kg)
+  var HALF_LIFE_DAYS  = 10;    // EMA smoothing: a reading loses half its weight after this many days
+  var RATE_WINDOW     = 28;    // days used to measure the current loss/gain pace
+  var STALL_PER_WEEK  = 0.15;  // |kg/week| below this = "Maintaining" (a real cut runs ~0.25-0.5/wk; below ~0.15 is maintenance noise)
+  var SHOW_RAW        = true;  // draw raw weigh-ins (dotted) behind the trend line
+  var AREA_FILL       = false;  // shade under the trend with a 1-bit dither pattern (vs no fill)
+  var GRID_COLOR      = '#000000'; // full black: gray gridlines dither away to nothing on 1-bit
+  var GRID_DASH       = 'Dot'; // dotted grid; 'Dot' = lighter, 'Dash'/'Solid' = heavier
+  var LOESS_SPAN         = 0.30; // history line: fraction of readings in each local-regression window (bigger = smoother)
+  var LOESS_ROBUST_ITERS = 2;    // history line: bisquare re-weighting passes that suppress outlier weigh-ins
+  var LOESS_GRID         = 80;   // history line: number of fitted points drawn across the whole historical span
+  // ==========================================
+
+  var nowMs = new Date().getTime();
+  var DAY = 86400000;
+
+  // ---- parse the two raw strings into {daysAgo, weight} ----
+  // rw = recent log, one slot per DAY (index 0 = today).
+  // hw = historical log, one slot per WEEK, placed before the recent log in time.
+  function parse(str, stepDays, offsetDays) {
+    var arr = str.split(";");
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].trim() !== "") {
+        var w = parseFloat(arr[i]);
+        if (w > 0.0) out.push({ daysAgo: offsetDays + i * stepDays, weight: w });
+      }
+    }
+    return out;
+  }
+
+  var rwArr = "{{ rw }}".split(";");
+  var recentEntries = parse("{{ rw }}", 1, 0);
+  var histEntries   = parse("{{ hw }}", 7, rwArr.length);
+
+  // chronological: oldest first, newest last
+  recentEntries.sort(function (a, b) { return b.daysAgo - a.daysAgo; });
+  histEntries.sort(function (a, b) { return b.daysAgo - a.daysAgo; });
+
+  var allEntries = histEntries.concat(recentEntries);
+
+  // ==========================================
+  // GAP-PROOF TIME-AWARE EMA
+  // ----------------------------------------------------------
+  // Standard EMA assumes evenly spaced points. With missing days the
+  // gap between readings varies, so we let the smoothing factor adapt
+  // to the real time gap:  alpha = 1 - exp(-deltaDays / tau).
+  // A long gap -> alpha near 1 -> the trend catches up to the new reading;
+  // back-to-back days -> small alpha -> heavy smoothing. tau is derived
+  // from a half-life: a reading's influence halves every HALF_LIFE_DAYS.
+  // Returns each entry annotated with .trend (the smoothed value).
+  // ==========================================
+  var TAU = HALF_LIFE_DAYS / Math.LN2;
+
+  function applyEma(entries) {
+    if (entries.length === 0) return [];
+    var ema = entries[0].weight;
+    entries[0].trend = ema;
+    for (var i = 1; i < entries.length; i++) {
+      var dt = entries[i - 1].daysAgo - entries[i].daysAgo;
+      var alpha = 1 - Math.exp(-dt / TAU);
+      ema = ema + alpha * (entries[i].weight - ema);
+      entries[i].trend = ema;
+    }
+    return entries;
+  }
+
+  applyEma(histEntries);
+  applyEma(recentEntries);
+
+  // ==========================================
+  // ROBUST LOESS (locally-weighted linear regression)
+  // ----------------------------------------------------------
+  // Used for the long-term history line. Each fitted point is a linear
+  // regression over the nearest `span` fraction of readings, tricube-weighted
+  // by time-distance. A nearest-neighbour window (not a fixed day-bandwidth)
+  // means it auto-widens across long gaps -> a clean near-straight bridge
+  // instead of a kink. `robustIters` bisquare re-weighting passes shrink the
+  // pull of outlier weigh-ins (e.g. a lone 79 among 85s). Returns an evaluator
+  // that gives the fitted weight at any point in time (daysAgo).
+  // ==========================================
+  function median(a) {
+    var s = a.slice().sort(function (x, y) { return x - y; });
+    var m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  function loessFit(xs, ys, span, robustIters) {
+    var n = xs.length;
+    var q = Math.max(2, Math.min(n, Math.round(span * n)));
+    var delta = []; for (var d = 0; d < n; d++) delta.push(1);
+
+    function fitAt(xq) {
+      var dist = [];
+      for (var i = 0; i < n; i++) dist.push({ i: i, d: Math.abs(xs[i] - xq) });
+      dist.sort(function (a, b) { return a.d - b.d; });
+      var h = dist[q - 1].d; if (h === 0) h = 1e-9;
+      var sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+      for (var k = 0; k < q; k++) {
+        var idx = dist[k].i, u = dist[k].d / h;
+        var tw = u < 1 ? Math.pow(1 - u * u * u, 3) : 0;
+        var w = tw * delta[idx];
+        var x = xs[idx], y = ys[idx];
+        sw += w; swx += w * x; swy += w * y; swxx += w * x * x; swxy += w * x * y;
+      }
+      var denom = sw * swxx - swx * swx;
+      if (Math.abs(denom) < 1e-12) return sw > 0 ? swy / sw : 0;
+      var b = (sw * swxy - swx * swy) / denom;
+      var a = (swy - b * swx) / sw;
+      return a + b * xq;
+    }
+
+    for (var iter = 0; iter < robustIters; iter++) {
+      var fitted = []; for (var i = 0; i < n; i++) fitted.push(fitAt(xs[i]));
+      var absr = []; for (var i = 0; i < n; i++) absr.push(Math.abs(ys[i] - fitted[i]));
+      var s = median(absr);
+      for (var i = 0; i < n; i++) {
+        if (s === 0) { delta[i] = 1; continue; }
+        var ui = (ys[i] - fitted[i]) / (6 * s);
+        delta[i] = Math.abs(ui) < 1 ? Math.pow(1 - ui * ui, 2) : 0;
+      }
+    }
+    return fitAt;
+  }
+
+  // a continuous per-day view of the recent trend line, for reading
+  // the trend value at "N days ago" even when no weigh-in happened then
+  function trendDaysAgo(targetDaysAgo) {
+    var pts = recentEntries;
+    if (pts.length === 0) return null;
+    if (targetDaysAgo <= pts[pts.length - 1].daysAgo) return pts[pts.length - 1].trend;
+    if (targetDaysAgo >= pts[0].daysAgo) return pts[0].trend;
+    for (var i = 0; i < pts.length - 1; i++) {
+      var a = pts[i], b = pts[i + 1];
+      if (targetDaysAgo <= a.daysAgo && targetDaysAgo >= b.daysAgo) {
+        var span = a.daysAgo - b.daysAgo;
+        var frac = span === 0 ? 0 : (a.daysAgo - targetDaysAgo) / span;
+        return a.trend + (b.trend - a.trend) * frac;
+      }
+    }
+    return pts[pts.length - 1].trend;
+  }
+
+  // least-squares slope of the smoothed line over the last `windowDays`,
+  // sampled daily. Regressing over the EMA (not raw readings) keeps the
+  // pace stable; this is what TrendWeight uses for its goal projection.
+  // Returns kg per forward-day; negative = losing.
+  function trendSlopePerDay(windowDays) {
+    var n = 0, sx = 0, sy = 0, sxy = 0, sxx = 0;
+    for (var d = 0; d <= windowDays; d++) {
+      var y = trendDaysAgo(newestDay + d);
+      if (y === null) break;
+      var x = -d;
+      n++; sx += x; sy += y; sxy += x * y; sxx += x * x;
+    }
+    var denom = n * sxx - sx * sx;
+    if (n < 2 || denom === 0) return 0;
+    return (n * sxy - sx * sy) / denom;
+  }
+
+  function setText(id, val) {
+    var el = document.getElementById(id);
+    if (el) el.innerText = val;
+  }
+  function fmtSigned(val) {
+    if (Math.abs(val) < 0.05) return "0.0";
+    return (val > 0 ? "+" : "") + val.toFixed(1);
+  }
+
+  var minWeight = 50, maxWeight = 100;
+
+  if (allEntries.length > 0) {
+      minWeight = Math.min.apply(null, allEntries.map(function (e) { return e.weight; }));
+      maxWeight = Math.max.apply(null, allEntries.map(function (e) { return e.weight; }));
+
+      var latestEntry  = recentEntries.length ? recentEntries[recentEntries.length - 1]
+                                              : allEntries[allEntries.length - 1];
+      var newestDay    = latestEntry.daysAgo;
+      var trendNow     = latestEntry.trend;
+
+      var trend7  = trendNow - trendDaysAgo(newestDay + 7);
+      var trend30 = trendNow - trendDaysAgo(newestDay + 30);
+
+      // pace = least-squares slope of the smoothed line over RATE_WINDOW days
+      var perDayRate = trendSlopePerDay(RATE_WINDOW);
+      var perWeek    = perDayRate * 7;
+
+      var peakDiff    = trendNow - maxWeight;
+      var distToGoal  = trendNow - GOAL_WEIGHT;
+      var totalJourney = maxWeight - GOAL_WEIGHT;
+      var pctComplete  = totalJourney > 0 ? ((maxWeight - trendNow) / totalJourney) * 100 : 0;
+
+      // ---- honest goal projection ----
+      var predictionText = "Flat";
+      if (distToGoal <= 0) {
+          predictionText = "At goal";
+      } else if (perWeek < -STALL_PER_WEEK) {
+          var weeksToGoal = distToGoal / Math.abs(perWeek);
+          if (weeksToGoal <= 260) {
+              var targetDate = new Date(nowMs + weeksToGoal * 7 * DAY);
+              predictionText = targetDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+          } else {
+              predictionText = "5+ yrs";
+          }
+      } else if (perWeek > STALL_PER_WEEK) {
+          predictionText = "Gaining";
+      }
+
+      setText("val-current", trendNow.toFixed(1));
+      setText("val-trend7", fmtSigned(trend7));
+      setText("val-trend30", fmtSigned(trend30));
+      setText("val-peakdiff", fmtSigned(peakDiff));
+      setText("val-max-lbl", "(ATH " + maxWeight.toFixed(1) + ")");
+      setText("val-goaldist", distToGoal.toFixed(1));
+      setText("val-goal-lbl", GOAL_WEIGHT.toFixed(1));
+      setText("val-goalpct", "(" + Math.max(0, Math.min(100, pctComplete)).toFixed(0) + "%)");
+      setText("val-prediction", predictionText);
+      setText("val-rate", "(" + fmtSigned(perWeek) + "/wk)");
+      setText("val-latest-w", latestEntry.weight.toFixed(1));
+      setText("val-latest", new Date(nowMs - newestDay * DAY).toLocaleDateString('en-US', { month: 'short', day: '2-digit' }));
+  }
+
+  // ==========================================
+  // CHART RENDERING
+  // ==========================================
+  var trendData = [];
+  var rawData = [];
+  var histMaxX = SPLIT_PERCENT > 0 ? SPLIT_PERCENT - 1 : 0;
+  var recMinX  = SPLIT_PERCENT < 100 ? SPLIT_PERCENT + 1 : 100;
+
+  // each half is its own true-time axis: points sit at their real position in
+  // elapsed days, not at their array index. A reading after a long gap lands far
+  // from its neighbour; a dense run bunches up. The 50/50 split (history left,
+  // recent right) and the scale-break at SPLIT_PERCENT are kept on purpose so the
+  // actionable recent months still get half the width.
+  function timeRange(entries) {
+      if (!entries.length) return null;
+      var ds = entries.map(function (e) { return e.daysAgo; });
+      return { oldest: Math.max.apply(null, ds), newest: Math.min.apply(null, ds) };
+  }
+  var histR = timeRange(histEntries);
+  var recR  = timeRange(recentEntries);
+
+  function xHist(daysAgo) {
+      if (!histR || histR.oldest === histR.newest) return histMaxX / 2;
+      var f = (histR.oldest - daysAgo) / (histR.oldest - histR.newest);
+      return histMaxX * Math.max(0, Math.min(1, f));
+  }
+  function xRec(daysAgo) {
+      if (!recR || recR.oldest === recR.newest) return (recMinX + 100) / 2;
+      var f = (recR.oldest - daysAgo) / (recR.oldest - recR.newest);
+      return recMinX + (100 - recMinX) * Math.max(0, Math.min(1, f));
+  }
+
+  // HISTORY: a robust-LOESS regression curve fitted through the weekly readings,
+  // sampled on a regular time grid so the line is smooth and gap-aware.
+  if (histEntries.length >= 2) {
+      var hx = histEntries.map(function (e) { return e.daysAgo; });
+      var hy = histEntries.map(function (e) { return e.weight; });
+      var fit = loessFit(hx, hy, LOESS_SPAN, LOESS_ROBUST_ITERS);
+      for (var g = 0; g < LOESS_GRID; g++) {
+          var gAgo = histR.oldest - (g / (LOESS_GRID - 1)) * (histR.oldest - histR.newest);
+          trendData.push({ x: xHist(gAgo), y: fit(gAgo), daysAgo: gAgo });
+      }
+  } else if (histEntries.length === 1) {
+      trendData.push({ x: xHist(histEntries[0].daysAgo), y: histEntries[0].weight, daysAgo: histEntries[0].daysAgo });
+  }
+
+  // RECENT: keep the causal EMA trend (so the headline stats stay on the line) and
+  // the raw weigh-in tracer; only the x-position changes to real time.
+  recentEntries.forEach(function (entry) {
+      trendData.push({ x: xRec(entry.daysAgo), y: entry.trend, daysAgo: entry.daysAgo });
+      rawData.push({ x: xRec(entry.daysAgo), y: entry.weight, daysAgo: entry.daysAgo });
+  });
+
+  // y-axis bounds from what is actually DRAWN (LOESS history + recent EMA + recent raw).
+  var drawnYs = trendData.map(function (p) { return p.y; }).concat(rawData.map(function (p) { return p.y; }));
+  var axisMin = drawnYs.length ? Math.min.apply(null, drawnYs) : (minWeight || 50);
+  var axisMax = drawnYs.length ? Math.max.apply(null, drawnYs) : (maxWeight || 100);
+
+  var transitionWeight = recentEntries.length > 0 ? recentEntries[0].weight
+                       : (allEntries.length > 0 ? allEntries[allEntries.length - 1].weight : 100);
+  var midPoint = (axisMax + axisMin) / 2;
+  var labelYOffset = transitionWeight > midPoint ? 250 : 20;
+
+  // axis ticks at meaningful calendar boundaries: one per YEAR across the history
+  // half, one per MONTH across the recent half -> evenly spaced in real time,
+  // independent of how many readings happen to fall in each interval.
+  var tickPositions = [];
+  var tickText = {};
+  function addTick(x, label) {
+      var k = x.toFixed(3);
+      if (tickText[k] === undefined) { tickPositions.push(x); tickText[k] = label; }
+  }
+  if (histR) {
+      var hOldYr = new Date(nowMs - histR.oldest * DAY).getFullYear();
+      var hNewYr = new Date(nowMs - histR.newest * DAY).getFullYear();
+      for (var yr = hOldYr; yr <= hNewYr; yr++) {
+          var janAgo = (nowMs - new Date(yr, 0, 1).getTime()) / DAY;
+          if (janAgo <= histR.oldest && janAgo >= histR.newest) addTick(xHist(janAgo), String(yr));
+      }
+      if (tickPositions.length === 0) addTick(0, String(hOldYr));
+  }
+  if (recR) {
+      var cur = new Date(nowMs - recR.oldest * DAY);
+      cur = new Date(cur.getFullYear(), cur.getMonth(), 1);
+      for (var guard = 0; guard < 240; guard++) {
+          var mAgo = (nowMs - cur.getTime()) / DAY;
+          if (mAgo < recR.newest) break;
+          if (mAgo <= recR.oldest && mAgo >= recR.newest) addTick(xRec(mAgo), cur.toLocaleDateString('en-US', { month: 'short' }));
+          cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      }
+  }
+
+  var series = [];
+  if (SHOW_RAW) {
+      series.push({
+          type: 'line', data: rawData, lineWidth: 1, color: '#000000',
+          dashStyle: 'Solid', marker: { enabled: false }, enableMouseTracking: false,
+          animation: false, zIndex: 4
+      });
+  }
+  series.push({
+      type: 'area', data: trendData, fillColor: AREA_FILL ? 'url(#einkFill)' : 'rgba(0,0,0,0)',
+      lineWidth: 3, lineColor: '#000000', color: '#000000',
+      marker: { enabled: false }, enableMouseTracking: false, animation: false, zIndex: 2
+  });
+
+  Highcharts.chart('weight-chart', {
+    chart: { type: 'area', height: 440, animation: false, margin: [10, 15, 80, 46], spacing: [0, 0, 0, 0], style: { fontFamily: 'Inter, Helvetica, Arial, sans-serif' } },
+    title: { text: null },
+    plotOptions: { series: { animation: false }, area: { marker: { enabled: false } } },
+    series: series,
+    yAxis: { tickPixelInterval: 25, min: axisMin - 2.0, max: axisMax + 2.0, startOnTick: false, endOnTick: false, gridLineColor: GRID_COLOR, gridLineWidth: 1, gridLineDashStyle: GRID_DASH, labels: { format: '{value:.0f}', style: { fontSize: '10px', textOverflow: 'none' }, align: 'right', x: -5, reserveSpace: true }, title: { text: null } },
+    xAxis: { type: 'linear', min: 0, max: 100, tickPositions: tickPositions,
+        plotLines: [{ color: '#000000', dashStyle: 'ShortDash', width: 2, value: SPLIT_PERCENT, zIndex: 5, label: { text: 'Daily Resol. →', align: 'left', verticalAlign: 'top', x: 8, y: labelYOffset, backgroundColor: '#ffffff', padding: 2, style: { fontSize: '10px', fontWeight: 'bold', color: '#000000', whiteSpace: 'nowrap' } } }],
+        labels: { rotation: -90, step: 1, style: { fontSize: '10px' }, formatter: function () {
+            return tickText[this.value.toFixed(3)] || '';
+        }},
+        gridLineColor: GRID_COLOR, gridLineDashStyle: GRID_DASH, gridLineWidth: 1, title: { text: null }
+    },
+    credits: { enabled: false }, legend: { enabled: false }
+  });
+</script>

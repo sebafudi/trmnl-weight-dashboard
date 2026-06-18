@@ -1,0 +1,18 @@
+# TRMNLP configuration
+# {{ env.VARIABLE }} interpolation is available here
+---
+# auto-reload when files change (`watch: false` to disable)
+watch:
+  - .trmnlp.yml
+  - src
+
+# values of custom fields (defined in src/settings.yml)
+custom_fields: {}
+
+# override variables
+# rw/hw are DUMMY preview data only — the real series come from the plugin's
+# polling data source on-device, so no real weight history lives in this repo.
+variables:
+  trmnl: {}
+  rw: "82.0;;;81.8;;;;82.1;;;;81.5;;;;;81.7;;;81.3"
+  hw: ";;83.5;;84.0;;;84.5;;85.0;;;85.5;;86.0;;;86.5;;87.0"
