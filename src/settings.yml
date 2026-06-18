@@ -1,17 +1,14 @@
-#
-# Changes to this file will be overwritten by `trmnlp pull`.
-#
-# Docs: https://help.trmnl.com/en/articles/10542599-importing-and-exporting-private-plugins#h_581fb988f0
-#
 ---
-id: 319290
-strategy: polling
+strategy: webhook
 no_screen_padding: 'no'
 dark_mode: 'no'
 static_data: ''
 polling_verb: get
-framework_version: latest
+framework_version: 3.1.1
+serverless_language: ''
 polling_url: ''
 polling_headers: ''
-name: Weight Dashboard
-refresh_interval: 1440
+polling_body: ''
+id: 319290
+name: My Plugin
+refresh_interval: 15
