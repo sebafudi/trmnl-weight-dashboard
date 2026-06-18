@@ -79,9 +79,9 @@
   var AREA_FILL       = false;  // shade under the trend with a 1-bit dither pattern (vs no fill)
   var GRID_COLOR      = '#000000'; // full black: gray gridlines dither away to nothing on 1-bit
   var GRID_DASH       = 'Dot'; // dotted grid; 'Dot' = lighter, 'Dash'/'Solid' = heavier
-  var LOESS_SPAN         = 0.30; // history line: fraction of readings in each local-regression window (bigger = smoother)
+  var LOESS_SPAN         = 0.06; // history line: fraction of readings in each local-regression window (smaller = higher resolution / follows weigh-ins more closely; below ~0.05 overshoots)
   var LOESS_ROBUST_ITERS = 2;    // history line: bisquare re-weighting passes that suppress outlier weigh-ins
-  var LOESS_GRID         = 80;   // history line: number of fitted points drawn across the whole historical span
+  var LOESS_GRID         = 220;  // history line: number of fitted points drawn across the whole historical span (higher = finer-drawn curve)
   // ==========================================
 
   var nowMs = new Date().getTime();
